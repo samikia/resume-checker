@@ -478,52 +478,136 @@ def extract_phone(text: str) -> Optional[str]:
     return None
 
 
-# ================== WORK EXPERIENCE (unchanged - already correct) ==================
+# ================== WORK EXPERIENCE ==================
+_ALL_DASHES = re.compile(r'[\u002D\u2010\u2011\u2012\u2013\u2014\u2015\u2212\uFE58\uFE63\uFF0D]')
+_MONTHS = r'(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)'
+_SEASONS = r'(?:spring|summer|fall|autumn|winter)'
+_MONTH_OR_SEASON = rf'(?:{_MONTHS}|{_SEASONS})'
+_PRESENT_WORDS = ['present', 'now', 'current', 'ongoing', 'اکنون', 'تاکنون', 'هم‌اکنون', 'هم اکنون', 'کنون']
+_WORD_TO_NUM = {'one': 1, 'two': 2, 'three': 3, 'four': 4, 'five': 5, 'six': 6, 'seven': 7, 'eight': 8, 'nine': 9, 'ten': 10}
+
+
+def _shamsi_to_gregorian(year: int) -> int:
+    if 1340 <= year <= 1430:
+        return year + 621
+    return year
+
+
+def _normalize_dashes(text: str) -> str:
+    return _ALL_DASHES.sub('-', text)
+
+
+def _find_section_start(text_lower: str, headers: list[str]) -> int:
+    """Find where a section starts by looking for headers on their own line."""
+    best = len(text_lower)
+    for h in headers:
+        for m in re.finditer(re.escape(h.lower()), text_lower):
+            pos = m.start()
+            # Check that the header is at or near the start of a line (not mid-sentence)
+            line_start = text_lower.rfind('\n', 0, pos)
+            prefix = text_lower[line_start + 1:pos].strip()
+            # Accept if prefix is empty or very short (e.g. bullet, emoji, number)
+            if len(prefix) <= 5:
+                best = min(best, pos)
+    return best
+
+
+def _find_education_start(text_lower: str) -> int:
+    """Find where education section starts so we can exclude it."""
+    edu_headers = ["education", "تحصیلات", "سوابق تحصیلی"]
+    pos = _find_section_start(text_lower, edu_headers)
+    return pos if pos < len(text_lower) else len(text_lower)
+
+
 def calculate_experience_years(text: str) -> float:
     current_year = datetime.now().year
-    text_lower = normalize_persian_digits(text.lower())
-    text_lower = text_lower.replace('–', '-').replace('—', '-').replace('present', str(current_year)).replace('now', str(current_year)).replace('اکنون', str(current_year))
+    text_norm = normalize_persian_digits(text)
+    text_lower = _normalize_dashes(text_norm.lower())
 
-    explicit_pattern = r'[\(\[]?\s*(\d{1,2})\s*(?:year|years?|سال|تجربه|experience)'
-    explicit_matches = re.findall(explicit_pattern, text_lower)
-    explicit_total = sum(float(m) for m in explicit_matches)
-    if explicit_total > 0:
-        return round(explicit_total, 1)
+    # --- Strategy 1: Explicit total in summary/header (first ~800 chars) ---
+    summary_area = text_lower[:800]
+    # Match digit-based: "5 years", "5+ years of experience", "۳ سال تجربه"
+    explicit_pattern = r'(\d{1,2})\+?\s*(?:year|years?|سال)\s*(?:of\s*)?(?:experience|تجربه)?'
+    explicit_matches = re.findall(explicit_pattern, summary_area)
+    if explicit_matches:
+        return round(max(float(m) for m in explicit_matches), 1)
 
+    # Match word-based: "five years of experience", "over three years"
+    word_num_pattern = rf'(?:over\s+|more\s+than\s+)?({"|".join(_WORD_TO_NUM.keys())})\s+years?\s*(?:of\s*)?(?:experience)?'
+    word_matches = re.findall(word_num_pattern, summary_area)
+    if word_matches:
+        return round(max(_WORD_TO_NUM[w] for w in word_matches), 1)
+
+    # Match "Since YYYY" pattern
+    since_match = re.search(r'since\s+(\d{4})', summary_area)
+    if since_match:
+        since_year = int(since_match.group(1))
+        if 1990 <= since_year <= current_year:
+            return round(current_year - since_year, 1)
+
+    # --- Strategy 2: Extract date ranges → merge intervals → sum durations ---
     work_headers = [
-        "technical experience", "work experience", "professional experience", "experience","WORK EXPERIENCE","Work Experiences","Work Experience",
-        "employment history", "سابقه کاری", "تجربه کاری", "سوابق شغلی", "تجربیات شغلی", "سوابق کاری"
+        "technical experience", "work experience", "professional experience",
+        "work experiences", "employment history", "experience",
+        "سابقه کاری", "تجربه کاری", "سوابق شغلی", "تجربیات شغلی", "سوابق کاری"
     ]
-    
-    work_start = len(text)
-    for h in work_headers:
-        pos = text_lower.find(h)
-        if pos != -1:
-            work_start = min(work_start, pos)
-    
-    work_text = text[work_start:] if work_start < len(text) else text
-    work_text_norm = normalize_persian_digits(work_text.lower())
-    work_text_norm = work_text_norm.replace('–', '-').replace('—', '-')
 
-    year_pattern = r'(\b\d{4}\b)\s*[-–]\s*(\b\d{4}\b|present|now|اکنون)'
-    matches = re.findall(year_pattern, work_text_norm)
-    
-    years = set()
+    work_start = _find_section_start(text_lower, work_headers)
+    edu_start = _find_education_start(text_lower)
+
+    # Use only the work section, stop before education if education comes after work
+    if work_start < len(text_lower):
+        if edu_start > work_start:
+            work_text = text_lower[work_start:edu_start]
+        else:
+            work_text = text_lower[work_start:]
+    else:
+        work_text = text_lower
+
+    # Replace present/now words with current year
+    for pw in _PRESENT_WORDS:
+        work_text = work_text.replace(pw, str(current_year))
+
+    # Pattern 1: [optional Month/Season] YYYY - [optional Month/Season] YYYY
+    date_range_pattern = rf'(?:{_MONTH_OR_SEASON}\s+)?(\d{{4}})\s*-\s*(?:{_MONTH_OR_SEASON}\s+)?(\d{{4}})'
+    matches = re.findall(date_range_pattern, work_text)
+
+    # Pattern 2: [optional Month/Season] YYYY- (open-ended = present)
+    open_ended_pattern = rf'(?:{_MONTH_OR_SEASON}\s+)?(\d{{4}})\s*-\s*$'
+    open_matches = re.findall(open_ended_pattern, work_text, re.MULTILINE)
+
+    intervals = []
     for start_str, end_str in matches:
         try:
-            start = int(start_str)
-            end = int(end_str) if end_str.isdigit() else current_year
-            if (1380 <= start <= current_year + 5) or (2010 <= start <= current_year + 5):
-                years.add(start)
-                years.add(end)
+            start = _shamsi_to_gregorian(int(start_str))
+            end = _shamsi_to_gregorian(int(end_str))
+            if 1990 <= start <= current_year + 1 and start <= end <= current_year + 1:
+                intervals.append((start, end))
         except:
             pass
-    
-    if years:
-        span = max(years) - min(years) + 1
-        return round(span, 1)
-    
-    return 0.0
+
+    for start_str in open_matches:
+        try:
+            start = _shamsi_to_gregorian(int(start_str))
+            if 1990 <= start <= current_year + 1:
+                intervals.append((start, current_year))
+        except:
+            pass
+
+    if not intervals:
+        return 0.0
+
+    # Merge overlapping intervals, then sum each duration
+    intervals.sort()
+    merged = [list(intervals[0])]
+    for start, end in intervals[1:]:
+        if start <= merged[-1][1]:
+            merged[-1][1] = max(merged[-1][1], end)
+        else:
+            merged.append([start, end])
+
+    total = sum(end - start for start, end in merged)
+    return round(total, 1)
 
 
 # ================== OTHER FUNCTIONS ==================
