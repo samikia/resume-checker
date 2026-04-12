@@ -478,52 +478,71 @@ def extract_phone(text: str) -> Optional[str]:
     return None
 
 
-# ================== WORK EXPERIENCE (unchanged - already correct) ==================
+# ================== WORK EXPERIENCE ==================
+def _shamsi_to_gregorian(year: int) -> int:
+    """Approximate conversion: Shamsi → Gregorian"""
+    if 1340 <= year <= 1430:
+        return year + 621
+    return year
+
+
 def calculate_experience_years(text: str) -> float:
     current_year = datetime.now().year
-    text_lower = normalize_persian_digits(text.lower())
-    text_lower = text_lower.replace('–', '-').replace('—', '-').replace('present', str(current_year)).replace('now', str(current_year)).replace('اکنون', str(current_year))
+    text_norm = normalize_persian_digits(text)
+    text_lower = text_norm.lower()
+    text_lower = text_lower.replace('–', '-').replace('—', '-')
 
-    explicit_pattern = r'[\(\[]?\s*(\d{1,2})\s*(?:year|years?|سال|تجربه|experience)'
-    explicit_matches = re.findall(explicit_pattern, text_lower)
-    explicit_total = sum(float(m) for m in explicit_matches)
-    if explicit_total > 0:
-        return round(explicit_total, 1)
+    # --- Strategy 1: Explicit total in summary/header (first ~600 chars only) ---
+    # Only look at the beginning of the resume to avoid per-job "2 years" noise
+    summary_area = text_lower[:600]
+    summary_area = summary_area.replace('present', str(current_year)).replace('now', str(current_year)).replace('اکنون', str(current_year)).replace('تاکنون', str(current_year)).replace('هم‌اکنون', str(current_year))
+    explicit_pattern = r'(\d{1,2})\+?\s*(?:year|years?|سال)\s*(?:of\s*)?(?:experience|تجربه)?'
+    explicit_matches = re.findall(explicit_pattern, summary_area)
+    if explicit_matches:
+        return round(max(float(m) for m in explicit_matches), 1)
 
+    # --- Strategy 2: Extract date ranges → merge intervals → sum durations ---
     work_headers = [
-        "technical experience", "work experience", "professional experience", "experience","WORK EXPERIENCE","Work Experiences","Work Experience",
+        "technical experience", "work experience", "professional experience", "experience",
         "employment history", "سابقه کاری", "تجربه کاری", "سوابق شغلی", "تجربیات شغلی", "سوابق کاری"
     ]
-    
-    work_start = len(text)
+
+    work_start = len(text_lower)
     for h in work_headers:
-        pos = text_lower.find(h)
+        pos = text_lower.find(h.lower())
         if pos != -1:
             work_start = min(work_start, pos)
-    
-    work_text = text[work_start:] if work_start < len(text) else text
-    work_text_norm = normalize_persian_digits(work_text.lower())
-    work_text_norm = work_text_norm.replace('–', '-').replace('—', '-')
 
-    year_pattern = r'(\b\d{4}\b)\s*[-–]\s*(\b\d{4}\b|present|now|اکنون)'
-    matches = re.findall(year_pattern, work_text_norm)
-    
-    years = set()
+    work_text = text_lower[work_start:]
+    work_text = work_text.replace('present', str(current_year)).replace('now', str(current_year)).replace('اکنون', str(current_year)).replace('تاکنون', str(current_year)).replace('هم‌اکنون', str(current_year))
+
+    year_pattern = r'(\b\d{4}\b)\s*[-–—]\s*(\b\d{4}\b)'
+    matches = re.findall(year_pattern, work_text)
+
+    intervals = []
     for start_str, end_str in matches:
         try:
-            start = int(start_str)
-            end = int(end_str) if end_str.isdigit() else current_year
-            if (1380 <= start <= current_year + 5) or (2010 <= start <= current_year + 5):
-                years.add(start)
-                years.add(end)
+            start = _shamsi_to_gregorian(int(start_str))
+            end = _shamsi_to_gregorian(int(end_str))
+            if 1990 <= start <= current_year + 1 and start <= end <= current_year + 1:
+                intervals.append((start, end))
         except:
             pass
-    
-    if years:
-        span = max(years) - min(years) + 1
-        return round(span, 1)
-    
-    return 0.0
+
+    if not intervals:
+        return 0.0
+
+    # Merge overlapping intervals, then sum each duration
+    intervals.sort()
+    merged = [list(intervals[0])]
+    for start, end in intervals[1:]:
+        if start <= merged[-1][1]:
+            merged[-1][1] = max(merged[-1][1], end)
+        else:
+            merged.append([start, end])
+
+    total = sum(end - start for start, end in merged)
+    return round(total, 1)
 
 
 # ================== OTHER FUNCTIONS ==================
