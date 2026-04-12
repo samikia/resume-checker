@@ -7,8 +7,9 @@ _MONTHS = r'(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|ju
 _SEASONS = r'(?:spring|summer|fall|autumn|winter)'
 _MONTH_OR_SEASON = rf'(?:{_MONTHS}|{_SEASONS})'
 _PRESENT_WORDS = [
-    'present', 'now', 'current', 'ongoing',
-    'اکنون', 'تاکنون', 'هم‌اکنون', 'هم اکنون', 'کنون',
+    'هم‌اکنون', 'هم اکنون', 'تاکنون',  # longer Persian words first to avoid partial replacement
+    'اکنون', 'کنون',
+    'present', 'ongoing', 'current', 'now',
 ]
 _WORD_TO_NUM = {
     'one': 1, 'two': 2, 'three': 3, 'four': 4, 'five': 5,
