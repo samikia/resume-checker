@@ -1,14 +1,15 @@
 import re
 from datetime import datetime
 
-from resume_checker.utils import normalize_persian_digits, normalize_dashes
+from resume_checker.utils import normalize_persian_digits, normalize_dashes, normalize_jobinja_ta
 
 _MONTHS = r'(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)'
+_PERSIAN_MONTHS = r'(?:فروردین|اردیبهشت|خرداد|تیر|مرداد|شهریور|مهر|آبان|آذر|دی|بهمن|اسفند)'
 _SEASONS = r'(?:spring|summer|fall|autumn|winter)'
-_MONTH_OR_SEASON = rf'(?:{_MONTHS}|{_SEASONS})'
+_MONTH_OR_SEASON = rf'(?:{_MONTHS}|{_PERSIAN_MONTHS}|{_SEASONS})'
 _PRESENT_WORDS = [
     'هم‌اکنون', 'هم اکنون', 'تاکنون',  # longer Persian words first to avoid partial replacement
-    'اکنون', 'کنون',
+    'اکنون', 'کنون', 'حالا', 'حال',
     'present', 'ongoing', 'current', 'now',
 ]
 _WORD_TO_NUM = {
@@ -20,8 +21,9 @@ _WORK_HEADERS = [
     "technical experience", "work experience", "professional experience",
     "work experiences", "employment history", "experience",
     "سابقه کاری", "تجربه کاری", "سوابق شغلی", "تجربیات شغلی", "سوابق کاری",
+    "تجربیات کاری", "تجربیات تحقیقاتی",
 ]
-_EDU_HEADERS = ["education", "تحصیلات", "سوابق تحصیلی"]
+_EDU_HEADERS = ["education", "تحصیلات", "سوابق تحصیلی", "تحصيلات"]
 
 
 def _shamsi_to_gregorian(year: int) -> int:
@@ -65,14 +67,24 @@ def calculate_experience_years(text: str) -> float:
     """
     current_year = datetime.now().year
     text_norm = normalize_persian_digits(text)
+    text_norm = normalize_jobinja_ta(text_norm)
     text_lower = normalize_dashes(text_norm.lower())
 
     # --- Strategy 1: Explicit total in summary/header (first ~800 chars) ---
     summary = text_lower[:800]
 
-    # 1a: digit-based ("5 years", "5+ years of experience")
+    # 1a: JobVision explicit field — RTL layout puts value BEFORE the label:
+    #   "سال 3.5\n:کاری سابقه میزان"  (label extracted RTL with : prefix)
+    jobvision_match = re.search(
+        r'سال\s+(\d{1,2}(?:\.\d)?)\s*\n[^0-9\n]*کاری سابقه میزان',
+        summary,
+    )
+    if jobvision_match:
+        return round(float(jobvision_match.group(1)), 1)
+
+    # 1b: digit-based LTR ("5 years", "5+ years of experience", "3.5 سال")
     digit_matches = re.findall(
-        r'(\d{1,2})\+?\s*(?:year|years?|سال)\s*(?:of\s*)?(?:experience|تجربه)?',
+        r'(?<!\d)(\d{1,2}(?:\.\d)?)\+?\s*(?:year|years?|سال)\s*(?:of\s*)?(?:experience|تجربه)?',
         summary,
     )
     if digit_matches:
@@ -98,7 +110,11 @@ def calculate_experience_years(text: str) -> float:
     if work_start < len(text_lower):
         work_text = text_lower[work_start:edu_start] if edu_start > work_start else text_lower[work_start:]
     else:
-        work_text = text_lower
+        # No work section found — scan the whole doc but exclude education section
+        if edu_start < len(text_lower):
+            work_text = text_lower[:edu_start]
+        else:
+            work_text = text_lower
 
     for pw in _PRESENT_WORDS:
         work_text = work_text.replace(pw, str(current_year))
@@ -115,8 +131,10 @@ def calculate_experience_years(text: str) -> float:
 
     for start_str, end_str in matches:
         try:
-            start = _shamsi_to_gregorian(int(start_str))
-            end = _shamsi_to_gregorian(int(end_str))
+            a = _shamsi_to_gregorian(int(start_str))
+            b = _shamsi_to_gregorian(int(end_str))
+            # Jobinja (and other RTL layouts) sometimes emit end-year first
+            start, end = (b, a) if a > b else (a, b)
             if 1990 <= start <= current_year + 1 and start <= end <= current_year + 1:
                 intervals.append((start, end))
         except ValueError:
